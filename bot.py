@@ -40,6 +40,17 @@ MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "900"))
 VISION_MAX_IMAGE_DIM = int(os.environ.get("VISION_MAX_IMAGE_DIM", "1280"))
 VISION_MAX_IMAGE_BYTES = int(os.environ.get("VISION_MAX_IMAGE_BYTES", "2500000"))
 
+# Cost saver:
+# If a post already has enough text, do not send its image to Claude Vision
+# unless the text looks like it needs the visual: chart/table/tweet/ranking/dashboard etc.
+VISION_TEXT_LIMIT = int(os.environ.get("VISION_TEXT_LIMIT", "350"))
+VISION_FORCE_KEYWORDS = [
+    "chart", "graph", "grafik", "table", "tablo", "dashboard", "ranking", "rank",
+    "tweet", "twitter", "x.com", "price", "fiyat", "roadmap", "tokenomics",
+    "airdrop", "leaderboard", "global ranking",
+    "차트", "그래프", "표", "랭킹", "순위", "대시보드", "트윗", "가격", "로드맵"
+]
+
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 
@@ -153,6 +164,29 @@ def message_has_image(message) -> bool:
     return False
 
 
+
+def should_use_vision(text: str, has_image: bool) -> bool:
+    """Cost saver: only use Claude Vision when the image is likely needed."""
+    if not VISION_ENABLED or not has_image:
+        return False
+
+    clean_text = (text or "").strip()
+    if not clean_text:
+        return True
+
+    # Short captions often depend on the image.
+    if len(clean_text) <= VISION_TEXT_LIMIT:
+        return True
+
+    lower_text = clean_text.lower()
+    if any(keyword.lower() in lower_text for keyword in VISION_FORCE_KEYWORDS):
+        return True
+
+    # Long news-style text usually contains the important information already;
+    # skip decorative article images/logos to reduce cost.
+    return False
+
+
 def compress_image_for_claude(raw: bytes, media_type: str) -> Tuple[bytes, str]:
     """Resize and convert images to JPEG to reduce vision token/cost and payload size."""
     try:
@@ -219,64 +253,46 @@ def build_prompt(text: str, link_context: str, has_image: bool) -> str:
     if has_image:
         image_instruction = """
 Görsel varsa:
-- Görseldeki Korece/İngilizce/Türkçe yazıları Türkçeye çevir.
-- Tweet, tablo, grafik, dashboard, ranking, fiyat, yüzde, tarih, token/proje isimleri varsa yazıldığı gibi aktar ve Türkçeleştir.
-- Görselde net olmayan yerleri uydurma; 'görselde net değil' de.
-- Görseldeki yazı ile Telegram mesaj metnini birbirine karıştırma; ayrı bölümde ver.
+- Görseldeki yazıları ayrı bölümde Türkçeye çevir.
+- Tweet, tablo, grafik, dashboard, ranking, fiyat, yüzde, tarih, token/proje isimlerini aktar.
+- Net olmayan yerleri uydurma; 'görselde net değil' de.
 """
 
-    return f"""Sen bir crypto/finans Telegram çeviri botusun.
+    return f"""Sen Korece/İngilizce crypto-finans Telegram mesajlarını Türkçeye çeviren botsun.
 
-Ana görev:
-Önce Telegram mesaj metnini ve varsa görseldeki yazıları Türkçeye çevir.
-Özetlemeden önce kaynakta yazan her önemli cümleyi koru.
-Son bölümde yalnızca kısa bir yorum/not yazabilirsin.
+Görev:
+- Mesaj metnini doğal Türkçe finans/kripto diliyle çevir.
+- Özetleme yapmadan önemli cümleleri koru; ama robotik kelime kelime çeviri yapma.
+- Görsel gönderildiyse görseldeki yazıları ayrıca çevir.
+- En sona kısa bağlam notu ekle.
 
-Çeviri tarzı:
-- Türkçe akıcı, doğal ve finans/kripto diline uygun olsun.
-- Kelime kelime robotik çeviri yapma; anlamı koruyarak düzgün Türkçe kur.
-- Korece haber/analiz dilini Türkçede doğal finans diliyle aktar.
-- "시장" için bağlama göre "piyasa", "투자자" için "yatırımcılar", "약세" için "zayıflama/düşüş baskısı", "강세" için "güçlenme/yükseliş eğilimi" gibi doğal karşılıklar kullan.
-- Başlıkları haber diliyle çevir; gereksiz devrik veya yapay cümle kurma.
-- Kurum/şirket/ürün isimlerini bozma: Nomura, FOMC, MSCI, Samsung Electronics, SK Hynix, Nous Research vb.
-
-Çok önemli kurallar:
-- Harici linkleri asla okuma, ziyaret etme veya özetleme.
-- Sadece Telegram mesajının kendi metnini ve varsa gönderilen görseli analiz et.
-- Mesaj metnini mümkün olduğunca cümle cümle çevir.
-- Görseldeki yazıları da mümkün olduğunca cümle cümle çevir.
-- Korece olumsuzluklara çok dikkat et:
-  * 안 나오다 = çıkmamak
-  * 안 나올 가능성 = çıkmama ihtimali
-  * 없어 보인다 = yok gibi görünüyor
-  * 아닐 수 있다 = olmayabilir
-- 'Token çıkar' ile 'token çıkmaz/çıkmayabilir' anlamını asla ters çevirme.
-- Crypto/finans jargonunu koru: DeFi, DEX, ETF, staking, airdrop, mainnet, testnet, validator, OTC, liquidity, Series B, FDV, FOMC, MSCI vb.
-- Bilmediğin şeyi uydurma.
-- Kaynak metinde olmayan bilgiyi çeviri bölümüne ekleme.
-- Kısa Not bölümünde "resmi açıklama" demeden önce emin ol. Emin değilsen "haber aktarımı", "kanal yorumu", "piyasa beklentisi" gibi temkinli ifade kullan.
-- Kısa Not 2-5 cümle olabilir; ama kaynakta olmayan yeni bilgi ekleme ve yatırım tavsiyesi verme.
+Kurallar:
+- Linkleri okuma, harici siteye gitme.
+- Kaynakta olmayan bilgiyi çeviri bölümüne ekleme.
+- Korece olumsuzlukları ters çevirme: 안 나오다=çıkmamak, 안 나올 가능성=çıkmama ihtimali, 아닐 수 있다=olmayabilir.
+- Jargon/isimleri koru: DeFi, DEX, ETF, OTC, liquidity, Series B, FDV, FOMC, MSCI, Samsung Electronics, SK Hynix vb.
+- Kısa Not bölümünde emin değilsen 'haber aktarımı', 'kanal yorumu' veya 'piyasa beklentisi' de; yatırım tavsiyesi verme.
 
 {image_instruction}
 
-Çıktı formatı:
+Format:
 🇹🇷 Mesaj Çevirisi:
-[Telegram mesaj metninin Türkçe çevirisi. Metin yoksa 'Mesaj metni yok.' yaz.]
+[Mesaj metninin Türkçe çevirisi. Metin yoksa 'Mesaj metni yok.']
 
 🖼️ Görsel Çevirisi:
-[Görsel varsa görseldeki yazıların ve görünen önemli bilgilerin Türkçe çevirisi. Görsel yoksa 'Görsel yok.' yaz.]
+[Görsel varsa görünen yazıların Türkçe çevirisi. Görsel yoksa 'Görsel yok.']
 
 📌 Kısa Not:
-[2-5 cümle. Sadece bağlam/yorum: haber aktarımı mı, kanal yorumu mu, piyasa beklentisi mi? Abartma, yatırım tavsiyesi verme.]
+[1-3 cümlelik bağlam notu.]
 
 🏷️ Etiketler:
-[varsa proje/token/konu isimleri]
+[proje/token/konu isimleri]
 
 Telegram mesaj metni:
 {text.strip() if text.strip() else '[Metin yok / sadece görsel olabilir]'}
 
 Link bağlamı:
-[Link okuma kapalı. Harici linkleri dikkate alma.]
+[Link okuma kapalı.]
 """
 
 
@@ -340,7 +356,7 @@ async def main() -> None:
     print("✅ Bot çalışıyor, kanal izleniyor...")
     print(f"📥 Kaynak: {SOURCE_CHATS}")
     print(f"📤 Hedef: {TARGET_CHANNEL}")
-    print(f"🧠 Model: {CLAUDE_MODEL} | Vision: {VISION_ENABLED} | Link reader: {LINK_READER_ENABLED}")
+    print(f"🧠 Model: {CLAUDE_MODEL} | Vision: {VISION_ENABLED} | Vision text limit: {VISION_TEXT_LIMIT} | Link reader: {LINK_READER_ENABLED}")
 
     @user_client.on(events.NewMessage(chats=SOURCE_CHATS))
     async def handler(event):
@@ -360,14 +376,15 @@ async def main() -> None:
             save_seen_ids(seen_ids)
             return
 
-        print(f"📨 Yeni mesaj: {seen_key} | text={bool(text.strip())} image={has_image}")
+        use_vision = should_use_vision(text, has_image)
+        print(f"📨 Yeni mesaj: {seen_key} | text={bool(text.strip())} image={has_image} vision={use_vision}")
 
         link_context = ""
         if text.strip() and LINK_READER_ENABLED:
             for url in extract_links(message)[:MAX_LINKS]:
                 link_context += await fetch_link_preview(url)
 
-        image_block = await build_image_block(message)
+        image_block = await build_image_block(message) if use_vision else None
         prompt = build_prompt(text, link_context, image_block is not None)
 
         try:
